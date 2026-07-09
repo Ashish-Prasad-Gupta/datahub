@@ -148,6 +148,7 @@ import com.linkedin.datahub.graphql.resolvers.lineage.UpdateLineageResolver;
 import com.linkedin.datahub.graphql.resolvers.load.AspectResolver;
 import com.linkedin.datahub.graphql.resolvers.load.BatchGetEntitiesResolver;
 import com.linkedin.datahub.graphql.resolvers.load.DashboardStatsSummaryBatchLoader;
+import com.linkedin.datahub.graphql.resolvers.load.EntityHealthBatchLoader;
 import com.linkedin.datahub.graphql.resolvers.load.EntityLineageResultResolver;
 import com.linkedin.datahub.graphql.resolvers.load.EntityRelationshipsResultResolver;
 import com.linkedin.datahub.graphql.resolvers.load.EntityTypeBatchResolver;
@@ -935,6 +936,11 @@ public class GmsGraphQLEngine {
             DashboardStatsSummaryBatchLoader.LOADER_NAME,
             context ->
                 DashboardStatsSummaryBatchLoader.createDataLoader(timeseriesAspectService, context))
+        .addDataLoader(
+            EntityHealthBatchLoader.LOADER_NAME,
+            context ->
+                EntityHealthBatchLoader.createDataLoader(
+                    this.entityClient, this.graphClient, timeseriesAspectService, context))
         .setGraphQLConfiguration(graphQLConfiguration)
         .setMetricUtils(metricUtils)
         .configureRuntimeWiring(this::configureRuntimeWiring);
@@ -1908,7 +1914,8 @@ public class GmsGraphQLEngine {
                             graphClient,
                             timeseriesAspectService,
                             new EntityHealthResolver.Config(
-                                true, true, featureFlags.isShowTestsInHealthIcon())))
+                                true, true, featureFlags.isShowTestsInHealthIcon()),
+                            featureFlags))
                     .dataFetcher("schemaMetadata", new AspectResolver())
                     .dataFetcher(
                         "assertions", new EntityAssertionsResolver(entityClient, graphClient))
@@ -2396,7 +2403,8 @@ public class GmsGraphQLEngine {
                         entityClient,
                         graphClient,
                         timeseriesAspectService,
-                        new EntityHealthResolver.Config(false, true, false))));
+                        new EntityHealthResolver.Config(false, true, false),
+                        featureFlags)));
     builder.type(
         "DashboardInfo",
         typeWiring ->
@@ -2542,7 +2550,8 @@ public class GmsGraphQLEngine {
                         entityClient,
                         graphClient,
                         timeseriesAspectService,
-                        new EntityHealthResolver.Config(false, true, false))));
+                        new EntityHealthResolver.Config(false, true, false),
+                        featureFlags)));
     builder.type(
         "ChartInfo",
         typeWiring ->
@@ -2770,7 +2779,8 @@ public class GmsGraphQLEngine {
                             entityClient,
                             graphClient,
                             timeseriesAspectService,
-                            new EntityHealthResolver.Config(false, true, false))))
+                            new EntityHealthResolver.Config(false, true, false),
+                            featureFlags)))
         .type(
             "DataJobInputOutput",
             typeWiring ->
@@ -2859,7 +2869,8 @@ public class GmsGraphQLEngine {
                         entityClient,
                         graphClient,
                         timeseriesAspectService,
-                        new EntityHealthResolver.Config(false, true, false))));
+                        new EntityHealthResolver.Config(false, true, false),
+                        featureFlags)));
   }
 
   /**
