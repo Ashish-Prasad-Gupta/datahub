@@ -10,14 +10,17 @@ import com.linkedin.common.EntityRelationship;
 import com.linkedin.common.EntityRelationshipArray;
 import com.linkedin.common.EntityRelationships;
 import com.linkedin.common.urn.Urn;
+import com.linkedin.common.urn.UrnUtils;
 import com.linkedin.data.template.StringArray;
 import com.linkedin.data.template.StringArrayArray;
 import com.linkedin.datahub.graphql.QueryContext;
+import com.linkedin.datahub.graphql.featureflags.FeatureFlags;
 import com.linkedin.datahub.graphql.generated.Dataset;
 import com.linkedin.datahub.graphql.generated.Health;
 import com.linkedin.datahub.graphql.generated.HealthStatus;
 import com.linkedin.datahub.graphql.generated.HealthStatusType;
 import com.linkedin.datahub.graphql.resolvers.dataset.DatasetHealthResolver;
+import com.linkedin.datahub.graphql.resolvers.load.EntityHealthBatchLoader;
 import com.linkedin.entity.Aspect;
 import com.linkedin.entity.EntityResponse;
 import com.linkedin.entity.EnvelopedAspect;
@@ -39,6 +42,10 @@ import graphql.schema.DataFetchingEnvironment;
 import io.datahubproject.metadata.context.OperationContext;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import org.dataloader.DataLoader;
+import org.dataloader.DataLoaderRegistry;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 import org.testng.annotations.Test;
 
@@ -587,5 +594,60 @@ public class EntityHealthResolverTest {
 
     List<Health> result = resolver.get(mockEnv).get();
     assertEquals(result.size(), 0);
+  }
+
+  @Test
+  public void testBatchLoadFlagEnabledDelegatesToDataLoader() throws Exception {
+    EntityClient entityClient = Mockito.mock(EntityClient.class);
+    GraphClient graphClient = Mockito.mock(GraphClient.class);
+    TimeseriesAspectService tsService = Mockito.mock(TimeseriesAspectService.class);
+
+    FeatureFlags flags = new FeatureFlags();
+    flags.setEntityHealthBatchLoadEnabled(true);
+
+    EntityHealthResolver resolver =
+        new EntityHealthResolver(
+            entityClient,
+            graphClient,
+            tsService,
+            new EntityHealthResolver.Config(true, true, true),
+            flags);
+
+    final Health expected = new Health();
+    expected.setType(HealthStatusType.INCIDENTS);
+    expected.setStatus(HealthStatus.FAIL);
+    final List<Health> expectedList = ImmutableList.of(expected);
+
+    @SuppressWarnings("unchecked")
+    final DataLoader<EntityHealthBatchLoader.HealthQueryKey, List<Health>> loader =
+        Mockito.mock(DataLoader.class);
+    Mockito.when(loader.load(any())).thenReturn(CompletableFuture.completedFuture(expectedList));
+    final DataLoaderRegistry registry = Mockito.mock(DataLoaderRegistry.class);
+    Mockito.when(registry.getDataLoader(EntityHealthBatchLoader.LOADER_NAME))
+        .thenReturn((DataLoader) loader);
+
+    QueryContext mockContext = Mockito.mock(QueryContext.class);
+    Mockito.when(mockContext.getAuthentication()).thenReturn(Mockito.mock(Authentication.class));
+    DataFetchingEnvironment mockEnv = Mockito.mock(DataFetchingEnvironment.class);
+    Mockito.when(mockEnv.getContext()).thenReturn(mockContext);
+    Mockito.when(mockEnv.getDataLoaderRegistry()).thenReturn(registry);
+    Dataset parentDataset = new Dataset();
+    parentDataset.setUrn(TEST_DATASET_URN);
+    Mockito.when(mockEnv.getSource()).thenReturn(parentDataset);
+
+    final List<Health> result = resolver.get(mockEnv).get();
+
+    // The flag path must delegate to the batch loader and return its result verbatim...
+    assertEquals(result, expectedList);
+    Mockito.verifyNoInteractions(graphClient, tsService);
+    // ...keyed by the source urn with the resolver's configured dimensions.
+    final ArgumentCaptor<EntityHealthBatchLoader.HealthQueryKey> keyCaptor =
+        ArgumentCaptor.forClass(EntityHealthBatchLoader.HealthQueryKey.class);
+    Mockito.verify(loader).load(keyCaptor.capture());
+    final EntityHealthBatchLoader.HealthQueryKey key = keyCaptor.getValue();
+    assertEquals(key.getUrn(), UrnUtils.getUrn(TEST_DATASET_URN));
+    assertTrue(key.isAssertionsEnabled());
+    assertTrue(key.isIncidentsEnabled());
+    assertTrue(key.isTestsEnabled());
   }
 }
