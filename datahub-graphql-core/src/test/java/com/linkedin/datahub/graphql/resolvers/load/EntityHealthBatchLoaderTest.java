@@ -5,6 +5,7 @@ import static org.testng.Assert.*;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
+import com.linkedin.common.AuditStamp;
 import com.linkedin.common.EntityRelationship;
 import com.linkedin.common.EntityRelationshipArray;
 import com.linkedin.common.EntityRelationships;
@@ -20,10 +21,13 @@ import com.linkedin.entity.EntityResponse;
 import com.linkedin.entity.EnvelopedAspect;
 import com.linkedin.entity.EnvelopedAspectMap;
 import com.linkedin.entity.client.EntityClient;
+import com.linkedin.incident.IncidentInfo;
+import com.linkedin.incident.IncidentState;
+import com.linkedin.incident.IncidentStatus;
 import com.linkedin.metadata.Constants;
 import com.linkedin.metadata.graph.GraphClient;
-import com.linkedin.metadata.search.SearchEntityArray;
-import com.linkedin.metadata.search.SearchResult;
+import com.linkedin.metadata.search.EntitySearchService;
+import com.linkedin.metadata.search.IncidentStats;
 import com.linkedin.metadata.timeseries.TimeseriesAspectService;
 import com.linkedin.test.TestResult;
 import com.linkedin.test.TestResultArray;
@@ -34,6 +38,7 @@ import io.datahubproject.metadata.context.OperationContext;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
@@ -58,6 +63,7 @@ public class EntityHealthBatchLoaderTest {
     final GraphClient graphClient = Mockito.mock(GraphClient.class);
     final TimeseriesAspectService timeseriesAspectService =
         Mockito.mock(TimeseriesAspectService.class);
+    final EntitySearchService entitySearchService = Mockito.mock(EntitySearchService.class);
 
     stubActiveAssertions(graphClient, DATASET_A, ASSERTION_A);
     stubActiveAssertions(graphClient, DATASET_B, ASSERTION_B);
@@ -78,7 +84,8 @@ public class EntityHealthBatchLoaderTest {
         .thenReturn(batchResult);
 
     final EntityHealthBatchLoader loader =
-        new EntityHealthBatchLoader(entityClient, graphClient, timeseriesAspectService);
+        new EntityHealthBatchLoader(
+            entityClient, graphClient, timeseriesAspectService, entitySearchService);
 
     final List<List<Health>> result =
         loader.batchLoad(
@@ -110,11 +117,11 @@ public class EntityHealthBatchLoaderTest {
     final GraphClient graphClient = Mockito.mock(GraphClient.class);
     final TimeseriesAspectService timeseriesAspectService =
         Mockito.mock(TimeseriesAspectService.class);
+    final EntitySearchService entitySearchService = Mockito.mock(EntitySearchService.class);
 
     stubActiveAssertions(graphClient, DATASET_A, ASSERTION_A);
-    // Incident lookups return "no active incidents" so incident health is PASS with no getV2.
-    Mockito.when(entityClient.filter(any(), any(), any(), any(), Mockito.anyInt(), Mockito.any()))
-        .thenReturn(new SearchResult().setNumEntities(0).setEntities(new SearchEntityArray()));
+    // Incident lookups return "no active incidents" so incident health is PASS with no batchGetV2.
+    Mockito.when(entitySearchService.getActiveIncidentStats(any(), any())).thenReturn(Map.of());
 
     final Map<Urn, GenericTable> batchResult = new HashMap<>();
     batchResult.put(Urn.createFromString(DATASET_A), assertionRunTable(ASSERTION_A, "SUCCESS"));
@@ -124,7 +131,8 @@ public class EntityHealthBatchLoaderTest {
         .thenReturn(batchResult);
 
     final EntityHealthBatchLoader loader =
-        new EntityHealthBatchLoader(entityClient, graphClient, timeseriesAspectService);
+        new EntityHealthBatchLoader(
+            entityClient, graphClient, timeseriesAspectService, entitySearchService);
 
     // A: dataset (assertions + incidents). C: chart (incidents only, assertions disabled).
     final EntityHealthBatchLoader.HealthQueryKey datasetKey =
@@ -171,6 +179,7 @@ public class EntityHealthBatchLoaderTest {
     final GraphClient graphClient = Mockito.mock(GraphClient.class);
     final TimeseriesAspectService timeseriesAspectService =
         Mockito.mock(TimeseriesAspectService.class);
+    final EntitySearchService entitySearchService = Mockito.mock(EntitySearchService.class);
 
     final Map<Urn, EntityResponse> testResponses = new HashMap<>();
     testResponses.put(Urn.createFromString(DATASET_A), testResultsResponse(1, 0)); // failing
@@ -186,7 +195,8 @@ public class EntityHealthBatchLoaderTest {
         .thenReturn(testResponses);
 
     final EntityHealthBatchLoader loader =
-        new EntityHealthBatchLoader(entityClient, graphClient, timeseriesAspectService);
+        new EntityHealthBatchLoader(
+            entityClient, graphClient, timeseriesAspectService, entitySearchService);
 
     final EntityHealthBatchLoader.HealthQueryKey keyA =
         new EntityHealthBatchLoader.HealthQueryKey(
@@ -216,6 +226,7 @@ public class EntityHealthBatchLoaderTest {
     final GraphClient graphClient = Mockito.mock(GraphClient.class);
     final TimeseriesAspectService timeseriesAspectService =
         Mockito.mock(TimeseriesAspectService.class);
+    final EntitySearchService entitySearchService = Mockito.mock(EntitySearchService.class);
 
     stubActiveAssertions(graphClient, DATASET_A, ASSERTION_A);
     // Assertion aggregation blows up (e.g. timeseries index unavailable).
@@ -224,14 +235,14 @@ public class EntityHealthBatchLoaderTest {
                 any(), any(), any(), any(), any(), any(), any(), any()))
         .thenThrow(new RuntimeException("boom: assertion index down"));
     // Incidents: none active -> PASS. Tests: one failing.
-    Mockito.when(entityClient.filter(any(), any(), any(), any(), Mockito.anyInt(), Mockito.any()))
-        .thenReturn(new SearchResult().setNumEntities(0).setEntities(new SearchEntityArray()));
+    Mockito.when(entitySearchService.getActiveIncidentStats(any(), any())).thenReturn(Map.of());
     final Map<Urn, EntityResponse> testResponses = new HashMap<>();
     testResponses.put(Urn.createFromString(DATASET_A), testResultsResponse(1, 0));
     Mockito.when(entityClient.batchGetV2(any(), any(), any(), any())).thenReturn(testResponses);
 
     final EntityHealthBatchLoader loader =
-        new EntityHealthBatchLoader(entityClient, graphClient, timeseriesAspectService);
+        new EntityHealthBatchLoader(
+            entityClient, graphClient, timeseriesAspectService, entitySearchService);
 
     final EntityHealthBatchLoader.HealthQueryKey key =
         new EntityHealthBatchLoader.HealthQueryKey(
@@ -259,6 +270,7 @@ public class EntityHealthBatchLoaderTest {
     final GraphClient graphClient = Mockito.mock(GraphClient.class);
     final TimeseriesAspectService timeseriesAspectService =
         Mockito.mock(TimeseriesAspectService.class);
+    final EntitySearchService entitySearchService = Mockito.mock(EntitySearchService.class);
 
     stubActiveAssertions(graphClient, DATASET_A, ASSERTION_A);
     stubActiveAssertions(graphClient, DATASET_B, ASSERTION_B);
@@ -272,7 +284,8 @@ public class EntityHealthBatchLoaderTest {
         .thenReturn(batchResult);
 
     final EntityHealthBatchLoader loader =
-        new EntityHealthBatchLoader(entityClient, graphClient, timeseriesAspectService);
+        new EntityHealthBatchLoader(
+            entityClient, graphClient, timeseriesAspectService, entitySearchService);
 
     // Must not throw despite A's malformed row.
     final List<List<Health>> result =
@@ -299,15 +312,16 @@ public class EntityHealthBatchLoaderTest {
     final GraphClient graphClient = Mockito.mock(GraphClient.class);
     final TimeseriesAspectService timeseriesAspectService =
         Mockito.mock(TimeseriesAspectService.class);
+    final EntitySearchService entitySearchService = Mockito.mock(EntitySearchService.class);
 
     // Incidents: none active -> PASS. Tests: batch fetch blows up.
-    Mockito.when(entityClient.filter(any(), any(), any(), any(), Mockito.anyInt(), Mockito.any()))
-        .thenReturn(new SearchResult().setNumEntities(0).setEntities(new SearchEntityArray()));
+    Mockito.when(entitySearchService.getActiveIncidentStats(any(), any())).thenReturn(Map.of());
     Mockito.when(entityClient.batchGetV2(any(), any(), any(), any()))
         .thenThrow(new RuntimeException("boom: test-results backend down"));
 
     final EntityHealthBatchLoader loader =
-        new EntityHealthBatchLoader(entityClient, graphClient, timeseriesAspectService);
+        new EntityHealthBatchLoader(
+            entityClient, graphClient, timeseriesAspectService, entitySearchService);
 
     // incidents + tests enabled, assertions off.
     final EntityHealthBatchLoader.HealthQueryKey key =
@@ -332,6 +346,7 @@ public class EntityHealthBatchLoaderTest {
     final GraphClient graphClient = Mockito.mock(GraphClient.class);
     final TimeseriesAspectService timeseriesAspectService =
         Mockito.mock(TimeseriesAspectService.class);
+    final EntitySearchService entitySearchService = Mockito.mock(EntitySearchService.class);
 
     // A's graph lookup throws; B's succeeds.
     Mockito.when(
@@ -348,7 +363,8 @@ public class EntityHealthBatchLoaderTest {
         .thenReturn(batchResult);
 
     final EntityHealthBatchLoader loader =
-        new EntityHealthBatchLoader(entityClient, graphClient, timeseriesAspectService);
+        new EntityHealthBatchLoader(
+            entityClient, graphClient, timeseriesAspectService, entitySearchService);
 
     final List<List<Health>> result =
         loader.batchLoad(
@@ -359,6 +375,60 @@ public class EntityHealthBatchLoaderTest {
     assertTrue(result.get(0).isEmpty()); // A: graph failed -> assertions dropped for A only
     assertEquals(result.get(1).size(), 1); // B: unaffected
     assertEquals(result.get(1).get(0).getType(), HealthStatusType.ASSERTIONS);
+  }
+
+  /**
+   * The incident dimension's N+1 guarantee: one {@code getActiveIncidentStats} aggregation call
+   * produces the count and latest-incident urn, and the latest incident's info is fetched with a
+   * single {@code batchGetV2} rather than a per-entity {@code filter}+{@code getV2}.
+   */
+  @Test
+  public void testIncidentsBatchedViaGetActiveIncidentStats() throws Exception {
+    final EntityClient entityClient = Mockito.mock(EntityClient.class);
+    final GraphClient graphClient = Mockito.mock(GraphClient.class);
+    final TimeseriesAspectService timeseriesAspectService =
+        Mockito.mock(TimeseriesAspectService.class);
+    final EntitySearchService entitySearchService = Mockito.mock(EntitySearchService.class);
+
+    final Urn datasetUrn = Urn.createFromString(DATASET_A);
+    final Urn incidentUrn = Urn.createFromString("urn:li:incident:i1");
+
+    Mockito.when(entitySearchService.getActiveIncidentStats(any(), Mockito.eq(Set.of(datasetUrn))))
+        .thenReturn(Map.of(datasetUrn, new IncidentStats(2, incidentUrn)));
+
+    final IncidentInfo info =
+        new IncidentInfo()
+            .setStatus(
+                new IncidentStatus()
+                    .setState(IncidentState.ACTIVE)
+                    .setLastUpdated(
+                        new AuditStamp()
+                            .setTime(123L)
+                            .setActor(Urn.createFromString("urn:li:corpuser:t"))));
+    final EnvelopedAspectMap aspectMap = new EnvelopedAspectMap();
+    aspectMap.put(
+        Constants.INCIDENT_INFO_ASPECT_NAME,
+        new EnvelopedAspect().setValue(new Aspect(info.data())));
+    Mockito.when(
+            entityClient.batchGetV2(
+                any(),
+                Mockito.eq(Constants.INCIDENT_ENTITY_NAME),
+                Mockito.eq(Set.of(incidentUrn)),
+                any()))
+        .thenReturn(
+            Map.of(incidentUrn, new EntityResponse().setUrn(incidentUrn).setAspects(aspectMap)));
+
+    final EntityHealthBatchLoader loader =
+        new EntityHealthBatchLoader(
+            entityClient, graphClient, timeseriesAspectService, entitySearchService);
+    final List<List<Health>> results =
+        loader.batchLoad(
+            List.of(new EntityHealthBatchLoader.HealthQueryKey(datasetUrn, false, true, false)),
+            mockContext());
+
+    assertEquals(results.get(0).get(0).getType(), HealthStatusType.INCIDENTS);
+    assertEquals(results.get(0).get(0).getStatus(), HealthStatus.FAIL);
+    Mockito.verify(entitySearchService, Mockito.times(1)).getActiveIncidentStats(any(), any());
   }
 
   private static GenericTable malformedAssertionRunTable() {

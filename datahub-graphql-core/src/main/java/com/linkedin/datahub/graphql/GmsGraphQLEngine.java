@@ -355,6 +355,7 @@ import com.linkedin.metadata.models.registry.EntityRegistry;
 import com.linkedin.metadata.query.filter.SortCriterion;
 import com.linkedin.metadata.query.filter.SortOrder;
 import com.linkedin.metadata.recommendation.RecommendationsService;
+import com.linkedin.metadata.search.EntitySearchService;
 import com.linkedin.metadata.service.ApplicationService;
 import com.linkedin.metadata.service.AssertionService;
 import com.linkedin.metadata.service.BusinessAttributeService;
@@ -428,6 +429,7 @@ public class GmsGraphQLEngine {
   private final GitVersion gitVersion;
   private final boolean supportsImpactAnalysis;
   private final TimeseriesAspectService timeseriesAspectService;
+  private final EntitySearchService entitySearchService;
   private final TimelineService timelineService;
   private final NativeUserService nativeUserService;
   private final GroupService groupService;
@@ -572,6 +574,7 @@ public class GmsGraphQLEngine {
     this.gitVersion = args.gitVersion;
     this.supportsImpactAnalysis = args.supportsImpactAnalysis;
     this.timeseriesAspectService = args.timeseriesAspectService;
+    this.entitySearchService = args.entitySearchService;
     this.timelineService = args.timelineService;
     this.nativeUserService = args.nativeUserService;
     this.groupService = args.groupService;
@@ -940,7 +943,11 @@ public class GmsGraphQLEngine {
             EntityHealthBatchLoader.LOADER_NAME,
             context ->
                 EntityHealthBatchLoader.createDataLoader(
-                    this.entityClient, this.graphClient, timeseriesAspectService, context))
+                    this.entityClient,
+                    this.graphClient,
+                    timeseriesAspectService,
+                    this.entitySearchService,
+                    context))
         .setGraphQLConfiguration(graphQLConfiguration)
         .setMetricUtils(metricUtils)
         .configureRuntimeWiring(this::configureRuntimeWiring);

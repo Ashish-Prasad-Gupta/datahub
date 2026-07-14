@@ -6,16 +6,15 @@ import com.linkedin.common.urn.Urn;
 import com.linkedin.datahub.graphql.QueryContext;
 import com.linkedin.datahub.graphql.concurrency.GraphQLConcurrencyUtils;
 import com.linkedin.datahub.graphql.generated.Health;
-import com.linkedin.datahub.graphql.generated.IncidentState;
 import com.linkedin.datahub.graphql.resolvers.health.HealthComputationUtils;
 import com.linkedin.entity.EntityResponse;
 import com.linkedin.entity.client.EntityClient;
 import com.linkedin.incident.IncidentInfo;
 import com.linkedin.metadata.Constants;
 import com.linkedin.metadata.graph.GraphClient;
-import com.linkedin.metadata.query.filter.Filter;
 import com.linkedin.metadata.query.filter.RelationshipDirection;
-import com.linkedin.metadata.search.SearchResult;
+import com.linkedin.metadata.search.EntitySearchService;
+import com.linkedin.metadata.search.IncidentStats;
 import com.linkedin.metadata.timeseries.TimeseriesAspectService;
 import com.linkedin.test.TestResults;
 import com.linkedin.timeseries.GenericTable;
@@ -23,9 +22,11 @@ import io.datahubproject.metadata.context.OperationContext;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Predicate;
@@ -51,11 +52,14 @@ import org.dataloader.DataLoaderOptions;
  *       sub-batch instead of one aggregation per entity).
  *   <li><b>Governance tests</b> — a single {@code batchGetV2} per entity type for the {@code
  *       testResults} aspect.
+ *   <li><b>Active incidents</b> — a single {@link EntitySearchService#getActiveIncidentStats}
+ *       aggregation for counts/latest-incident-urn, plus a single {@code batchGetV2} for the latest
+ *       incidents' info.
  * </ul>
  *
- * <p>Two dimensions have no batch primitive today and are still computed once per entity, but
+ * <p>One dimension has no batch primitive today and is still computed once per entity, but
  * concurrently within this loader: active-assertion graph lookups ({@link
- * GraphClient#getRelatedEntities}) and active-incident counts ({@link EntityClient#filter}).
+ * GraphClient#getRelatedEntities}).
  *
  * <p><b>Failure isolation:</b> a failure in one dimension degrades to an empty result for that
  * dimension (logged) rather than failing the whole page — both in the concurrent FETCH phase (each
@@ -76,6 +80,7 @@ public class EntityHealthBatchLoader {
   private final EntityClient entityClient;
   private final GraphClient graphClient;
   private final TimeseriesAspectService timeseriesAspectService;
+  private final EntitySearchService entitySearchService;
 
   /** Composite DataLoader key: which entity, and which health dimensions to compute for it. */
   @Value
@@ -90,9 +95,11 @@ public class EntityHealthBatchLoader {
       final EntityClient entityClient,
       final GraphClient graphClient,
       final TimeseriesAspectService timeseriesAspectService,
+      final EntitySearchService entitySearchService,
       final QueryContext queryContext) {
     final EntityHealthBatchLoader loader =
-        new EntityHealthBatchLoader(entityClient, graphClient, timeseriesAspectService);
+        new EntityHealthBatchLoader(
+            entityClient, graphClient, timeseriesAspectService, entitySearchService);
     final BatchLoaderContextProvider provider = () -> queryContext;
     final DataLoaderOptions options =
         DataLoaderOptions.newOptions().setBatchLoaderContextProvider(provider);
@@ -325,71 +332,68 @@ public class EntityHealthBatchLoader {
     if (incidentUrns.isEmpty()) {
       return Collections.emptyMap();
     }
-    final Map<Urn, CompletableFuture<Health>> futures = new LinkedHashMap<>();
-    for (Urn urn : incidentUrns) {
-      // computeIncidentsHealth catches its own exceptions and returns null, so the future never
-      // completes exceptionally — per-URN failures are already isolated inside it.
-      futures.put(
-          urn,
-          GraphQLConcurrencyUtils.supplyAsync(
-              () -> computeIncidentsHealth(urn.toString(), context),
-              LOADER_NAME,
-              "computeIncidentsHealth"));
-    }
-    CompletableFuture.allOf(futures.values().toArray(new CompletableFuture[0])).join();
+    final OperationContext opContext = context.getOperationContext();
+
+    // Phase 1: one aggregation for count + latest incident urn per entity.
+    final Map<Urn, IncidentStats> stats =
+        entitySearchService.getActiveIncidentStats(opContext, new HashSet<>(incidentUrns));
+
+    // Phase 2: one batchGetV2 for the latest incidents' info.
+    final Set<Urn> latestIncidentUrns =
+        stats.values().stream()
+            .map(IncidentStats::getLatestIncidentUrn)
+            .filter(Objects::nonNull)
+            .collect(Collectors.toSet());
+    final Map<Urn, IncidentInfo> incidentInfos =
+        batchGetIncidentInfo(latestIncidentUrns, opContext);
+
+    // Phase 3: assemble per-entity incident health.
     final Map<Urn, Health> result = new HashMap<>();
-    futures.forEach(
-        (urn, future) -> {
-          final Health h = future.join();
-          if (h != null) {
-            result.put(urn, h);
-          }
-        });
+    for (Urn urn : incidentUrns) {
+      final IncidentStats stat = stats.get(urn);
+      final int count = stat != null ? stat.getActiveCount() : 0;
+      final Urn latestUrn = stat != null ? stat.getLatestIncidentUrn() : null;
+      final IncidentInfo info = latestUrn != null ? incidentInfos.get(latestUrn) : null;
+      final Health h = HealthComputationUtils.buildIncidentHealth(count, latestUrn, info);
+      if (h != null) {
+        result.put(urn, h);
+      }
+    }
     return result;
   }
 
-  private Health computeIncidentsHealth(final String entityUrn, final QueryContext context) {
+  private Map<Urn, IncidentInfo> batchGetIncidentInfo(
+      final Set<Urn> incidentUrns, final OperationContext opContext) {
+    if (incidentUrns.isEmpty()) {
+      return Collections.emptyMap();
+    }
     try {
-      final Filter filter =
-          HealthComputationUtils.incidentsEntityFilter(entityUrn, IncidentState.ACTIVE.toString());
-      final SearchResult searchResult =
-          entityClient.filter(
-              context.getOperationContext(),
+      final Map<Urn, EntityResponse> responses =
+          entityClient.batchGetV2(
+              opContext,
               Constants.INCIDENT_ENTITY_NAME,
-              filter,
-              HealthComputationUtils.incidentsSort(),
-              0,
-              1);
-      final int activeIncidentCount = searchResult.getNumEntities();
-      Urn latestIncidentUrn = null;
-      IncidentInfo latestIncidentInfo = null;
-      if (activeIncidentCount > 0) {
-        latestIncidentUrn = searchResult.getEntities().get(0).getEntity();
-        latestIncidentInfo = getIncidentInfo(context, latestIncidentUrn);
-      }
-      return HealthComputationUtils.buildIncidentHealth(
-          activeIncidentCount, latestIncidentUrn, latestIncidentInfo);
+              incidentUrns,
+              ImmutableSet.of(Constants.INCIDENT_INFO_ASPECT_NAME));
+      final Map<Urn, IncidentInfo> result = new HashMap<>();
+      responses.forEach(
+          (urn, response) -> {
+            if (response != null
+                && response.getAspects().containsKey(Constants.INCIDENT_INFO_ASPECT_NAME)) {
+              result.put(
+                  urn,
+                  new IncidentInfo(
+                      response
+                          .getAspects()
+                          .get(Constants.INCIDENT_INFO_ASPECT_NAME)
+                          .getValue()
+                          .data()));
+            }
+          });
+      return result;
     } catch (Exception e) {
-      log.error("Failed to compute incident health status for {}", entityUrn, e);
-      return null;
+      log.error("Failed to batch-fetch incident info", e);
+      return Collections.emptyMap();
     }
-  }
-
-  private IncidentInfo getIncidentInfo(final QueryContext context, final Urn incidentUrn)
-      throws Exception {
-    final EntityResponse entityResponse =
-        entityClient.getV2(
-            context.getOperationContext(),
-            Constants.INCIDENT_ENTITY_NAME,
-            incidentUrn,
-            Set.of(Constants.INCIDENT_INFO_ASPECT_NAME),
-            false);
-    if (entityResponse == null
-        || !entityResponse.getAspects().containsKey(Constants.INCIDENT_INFO_ASPECT_NAME)) {
-      return null;
-    }
-    return new IncidentInfo(
-        entityResponse.getAspects().get(Constants.INCIDENT_INFO_ASPECT_NAME).getValue().data());
   }
 
   // ---------------------------------------------------------------------------
