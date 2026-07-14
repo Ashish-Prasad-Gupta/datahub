@@ -154,7 +154,7 @@ public class EntityHealthBatchLoader {
                   return Collections.<Urn, TestResults>emptyMap();
                 });
 
-    // D: active-incident health — per-URN search, run concurrently.
+    // D: active-incident health — one getActiveIncidentStats aggregation + one batchGetV2 for info.
     final CompletableFuture<Map<Urn, Health>> incidentHealthFuture =
         GraphQLConcurrencyUtils.supplyAsync(
                 () -> fetchIncidentHealth(incidentUrns, context),
