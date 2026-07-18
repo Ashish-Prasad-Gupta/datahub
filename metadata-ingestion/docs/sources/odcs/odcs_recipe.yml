@@ -7,8 +7,7 @@ source:
     # logical `odcs` Dataset carrying the contract's schema and assertions.
     path: ./contracts/
 
-    # `path` also accepts remote locations (install with
-    # `pip install 'acryl-datahub[odcs]'`):
+    # `path` also accepts remote locations:
     #   path: s3://my-bucket/contracts/*.odcs.yaml   # requires aws_connection
     #   path: gs://my-bucket/contracts/*.odcs.yaml   # requires gcs_connection
     #   path: https://example.com/orders.odcs.yaml   # single file only (no globs)
