@@ -30,6 +30,7 @@ from datahub.ingestion.api.source import (
 from datahub.ingestion.api.workunit import MetadataWorkUnit
 from datahub.ingestion.source.aws.s3_util import is_s3_uri
 from datahub.ingestion.source.common.object_store_files import (
+    FileSizeExceededError,
     expand_object_store_glob,
     has_glob_characters,
     is_http_uri,
@@ -528,30 +529,34 @@ class ODCSSource(StatefulIngestionSourceBase):
 
     def _load_remote_yaml(self, uri: str) -> Optional[tuple]:
         try:
+            # max_bytes lets the reader bound the download (Content-Length /
+            # bounded read / mid-stream abort) so an oversized remote object is
+            # never fully buffered into memory before we check its size.
             raw_bytes = read_file_as_bytes(
                 uri,
                 self.config.aws_connection,
                 self.config.gcs_connection,
+                max_bytes=self.config.max_input_file_bytes,
             )
+        except FileSizeExceededError as e:
+            self.report.warning(
+                title="ODCS file exceeds max_input_file_bytes",
+                message=(
+                    "Remote file exceeds the configured "
+                    f"max_input_file_bytes ({self.config.max_input_file_bytes}); "
+                    "skipping. Raise max_input_file_bytes to ingest larger files."
+                ),
+                context=uri,
+                exc=e,
+            )
+            self.report.files_skipped.append(uri)
+            return None
         except Exception as e:
             self.report.warning(
                 title="Failed to read remote ODCS file",
                 message="Could not fetch file from the object store / URL; skipping",
                 context=uri,
                 exc=e,
-            )
-            self.report.files_skipped.append(uri)
-            return None
-        # ponytail: the whole object is fetched into memory before the size
-        # check; fine for contract YAML (default 5 MB cap), not for huge blobs.
-        if len(raw_bytes) > self.config.max_input_file_bytes:
-            self.report.warning(
-                title="ODCS file exceeds max_input_file_bytes",
-                message=(
-                    f"File size {len(raw_bytes)} bytes exceeds configured limit "
-                    f"{self.config.max_input_file_bytes}; skipping."
-                ),
-                context=uri,
             )
             self.report.files_skipped.append(uri)
             return None

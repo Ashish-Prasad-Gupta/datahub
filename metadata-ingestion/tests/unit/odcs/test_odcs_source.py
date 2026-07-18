@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from datahub.emitter.mcp import MetadataChangeProposalWrapper
 from datahub.ingestion.api.common import PipelineContext
+from datahub.ingestion.source.common.object_store_files import FileSizeExceededError
 from datahub.ingestion.source.odcs import odcs_source
 from datahub.ingestion.source.odcs.odcs_config import ODCSSourceConfig
 from datahub.ingestion.source.odcs.odcs_source import ODCSSource
@@ -739,9 +740,19 @@ def test_resolve_remote_uris_http_glob_unsupported_warns(
 def test_load_remote_yaml_size_guard(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # The reader enforces the cap (bounded download) and raises; the source
+    # forwards max_input_file_bytes and turns the error into a skip.
     src = _make_source(tmp_path, max_input_file_bytes=8)
-    monkeypatch.setattr(odcs_source, "read_file_as_bytes", lambda *a, **k: b"x" * 100)
+    seen: Dict[str, Any] = {}
+
+    def _too_big(*a: Any, **k: Any) -> bytes:
+        seen.update(k)
+        raise FileSizeExceededError("big.odcs.yaml is 100 bytes, over the limit of 8")
+
+    monkeypatch.setattr(odcs_source, "read_file_as_bytes", _too_big)
     assert src._load_remote_yaml("s3://bucket/big.odcs.yaml") is None
+    assert seen.get("max_bytes") == 8
+    assert "s3://bucket/big.odcs.yaml" in src.report.files_skipped
     assert any(
         "max_input_file_bytes" in str(getattr(w, "title", ""))
         for w in src.report.warnings
