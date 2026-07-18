@@ -229,14 +229,25 @@ class ODCSSourceConfig(
     )
     emit_data_contract: bool = Field(
         default=True,
-        description="Whether to emit a native DataHub `dataContract` entity for each schema entry. "
-        "The contract is emitted on the logical `odcs` dataset (the self-consistent home, since the "
-        "assertions target it; it renders under the LOGICAL_MODELS_ENABLED flag) and, when the "
-        "entry binds to a physical dataset, also on that physical dataset so it surfaces on the "
-        "table consumers browse. Both reference the same schema and data-quality Assertion URNs "
-        "(no assertions are duplicated). State mirrors the ODCS `status` (`active` -> ACTIVE, "
-        "otherwise PENDING). Requires at least one of `emit_assertions` / `emit_schema_assertion` "
-        "to have produced an assertion for the entry.",
+        description="Whether to emit a native DataHub `dataContract` entity for each schema entry, "
+        "on the logical `odcs` dataset. This is the self-consistent home: the assertions target "
+        "the logical dataset, so `contract.entity == assertion.entity` and results resolve "
+        "directly; it renders under the LOGICAL_MODELS_ENABLED flag. The contract references the "
+        "schema and data-quality Assertion URNs (no assertions are duplicated). State mirrors the "
+        "ODCS `status` (`active` -> ACTIVE, otherwise PENDING). Requires at least one of "
+        "`emit_assertions` / `emit_schema_assertion` to have produced an assertion for the entry.",
+    )
+    emit_physical_data_contract: bool = Field(
+        default=False,
+        description="Whether to ALSO emit the native `dataContract` onto the bound physical "
+        "dataset (in addition to the logical one), so it surfaces on the table consumers browse. "
+        "Off by default because the contract URN is keyed on the target entity and matches the "
+        "hand-authored SDK convention exactly: enabling this makes ODCS the owner of that "
+        "dataset's contract and overwrites any hand-authored contract on it. It is always emitted "
+        "non-primary (never stale-removed, so it cannot soft-delete a hand-authored contract) and "
+        "requires `emit_logical_parent` (the master switch for writing onto physical datasets). "
+        "Note: the referenced assertions target the logical dataset, so the contract may render "
+        "with limited detail on the physical table until assertions can target it directly.",
     )
     physical_urn_overrides: Dict[str, Dict[str, str]] = Field(
         default_factory=dict,

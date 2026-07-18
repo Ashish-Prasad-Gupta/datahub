@@ -381,16 +381,36 @@ def _physical_urn_of(workunits: List) -> str:
     return urn
 
 
-def test_data_contract_emitted_on_both_logical_and_physical(
+def test_data_contract_logical_only_by_default_when_bound(
     tmp_path: pathlib.Path,
 ) -> None:
-    """A bound entry yields two native dataContracts — one on the logical `odcs`
-    dataset (the self-consistent home) and one on the physical dataset — both
-    referencing the same schema + data-quality assertions and mirroring the ODCS
-    `active` status."""
+    """By default (emit_physical_data_contract=False) a bound entry gets only the
+    logical `odcs` contract — nothing is written onto the physical dataset's
+    contract, whose urn collides with the hand-authored SDK convention."""
     contract_file = tmp_path / "c.odcs.yaml"
     contract_file.write_text(_VALID_CONTRACT_BODY, encoding="utf-8")
     src = _make_source(tmp_path, path=str(contract_file))
+    workunits = list(src.get_workunits_internal())
+
+    props = _aspects_of(workunits, DataContractPropertiesClass)
+    assert len(props) == 1
+    assert "urn:li:dataPlatform:odcs" in props[0].entity
+    assert src.report.data_contracts_emitted == 1
+
+
+def test_data_contract_emitted_on_both_when_physical_opted_in(
+    tmp_path: pathlib.Path,
+) -> None:
+    """With emit_physical_data_contract=True a bound entry yields two native
+    dataContracts: the logical one (primary, ODCS-owned) and the physical one
+    (non-primary, so stale removal never soft-deletes a hand-authored contract).
+    Both reference the same schema + data-quality assertions and mirror the ODCS
+    `active` status."""
+    contract_file = tmp_path / "c.odcs.yaml"
+    contract_file.write_text(_VALID_CONTRACT_BODY, encoding="utf-8")
+    src = _make_source(
+        tmp_path, path=str(contract_file), emit_physical_data_contract=True
+    )
     workunits = list(src.get_workunits_internal())
 
     physical_urn = _physical_urn_of(workunits)
@@ -404,12 +424,13 @@ def test_data_contract_emitted_on_both_logical_and_physical(
     logical_urn = next(u for u in by_entity if "urn:li:dataPlatform:odcs" in u)
     assert set(by_entity) == {logical_urn, physical_urn}
 
-    # Each contract urn is derived from its own entity and ODCS owns both.
-    assert {_mcp(wu).entityUrn for wu in contract_wus} == {
-        odcs_data_contract_urn(logical_urn),
-        odcs_data_contract_urn(physical_urn),
+    # Each contract urn is derived from its own entity; the logical contract is
+    # primary (ODCS-owned) while the physical one is non-primary.
+    primary_by_contract_urn = {
+        _mcp(wu).entityUrn: wu.is_primary_source for wu in contract_wus
     }
-    assert all(wu.is_primary_source for wu in contract_wus)
+    assert primary_by_contract_urn[odcs_data_contract_urn(logical_urn)] is True
+    assert primary_by_contract_urn[odcs_data_contract_urn(physical_urn)] is False
 
     # Both reference the same assertions, each of which this run actually emitted.
     emitted_assertion_urns = {
@@ -426,6 +447,27 @@ def test_data_contract_emitted_on_both_logical_and_physical(
     states = {a.state for a in _aspects_of(workunits, DataContractStatusClass)}
     assert states == {DataContractStateClass.ACTIVE}
     assert src.report.data_contracts_emitted == 2
+
+
+def test_physical_data_contract_requires_emit_logical_parent(
+    tmp_path: pathlib.Path,
+) -> None:
+    """emit_physical_data_contract only writes onto the physical dataset when
+    emit_logical_parent (the master switch for physical writes) is also on."""
+    contract_file = tmp_path / "c.odcs.yaml"
+    contract_file.write_text(_VALID_CONTRACT_BODY, encoding="utf-8")
+    src = _make_source(
+        tmp_path,
+        path=str(contract_file),
+        emit_physical_data_contract=True,
+        emit_logical_parent=False,
+    )
+    workunits = list(src.get_workunits_internal())
+
+    props = _aspects_of(workunits, DataContractPropertiesClass)
+    assert len(props) == 1
+    assert "urn:li:dataPlatform:odcs" in props[0].entity
+    assert src.report.data_contracts_emitted == 1
 
 
 def test_data_contract_state_pending_when_status_not_active(
@@ -473,6 +515,7 @@ def test_data_contract_skipped_when_no_assertions(tmp_path: pathlib.Path) -> Non
     assert _aspects_of(workunits, LogicalParentClass)
     assert not _aspects_of(workunits, DataContractPropertiesClass)
     assert src.report.data_contracts_emitted == 0
+    assert src.report.data_contracts_skipped_no_assertions == 1
 
 
 def test_emit_data_contract_flag_disables(tmp_path: pathlib.Path) -> None:

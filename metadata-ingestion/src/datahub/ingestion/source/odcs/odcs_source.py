@@ -134,6 +134,7 @@ class ODCSSourceReport(StaleEntityRemovalSourceReport):
     assertions_emitted: int = 0
     schema_assertions_emitted: int = 0
     data_contracts_emitted: int = 0
+    data_contracts_skipped_no_assertions: int = 0
     unknown_fields_count: int = 0
     validation_errors: int = 0
     unmappable_servers: int = 0
@@ -162,8 +163,8 @@ class ODCSSourceReport(StaleEntityRemovalSourceReport):
     SourceCapability.DELETION_DETECTION,
     "Via standard stateful ingestion (`stateful_ingestion.remove_stale_metadata`): only "
     "the logical `odcs` Datasets, Assertions, and native data contracts ODCS owns are "
-    "stale-removed; physical datasets and their `logicalParent` links are never marked "
-    "removed.",
+    "stale-removed; physical datasets, their `logicalParent` links, and the optional "
+    "physical-dataset contract are never marked removed.",
 )
 class ODCSSource(StatefulIngestionSourceBase):
     """Ingest Open Data Contract Standard (ODCS) v3.x YAML documents as logical models.
@@ -730,14 +731,9 @@ class ODCSSource(StatefulIngestionSourceBase):
                     for mcp in schema_assertion_mcps:
                         yield mcp.as_workunit()
 
-            # The logical dataset is the self-consistent contract home: the
-            # assertions target it, so contract.entity == assertion.entity and
-            # results resolve directly. Emitted for every entry with assertions,
-            # bound or not; it renders under the LOGICAL_MODELS_ENABLED flag.
-            if self.config.emit_data_contract:
-                yield from self._emit_data_contract(
-                    contract, logical_urn, schema_assertion_urn, assertion_urns
-                )
+            yield from self._emit_logical_contract(
+                contract, logical_urn, schema_assertion_urn, assertion_urns
+            )
 
             if binding.physical_urn is None:
                 # No binding costs only the logicalParent link — never the
@@ -808,12 +804,61 @@ class ODCSSource(StatefulIngestionSourceBase):
                 )
                 self.report.logical_parents_emitted += 1
 
-            # The physical dataset also gets a contract so it surfaces on the
-            # table consumers browse; it references the same logical assertions.
-            if self.config.emit_data_contract:
-                yield from self._emit_data_contract(
-                    contract, physical_urn, schema_assertion_urn, assertion_urns
-                )
+            yield from self._emit_physical_contract(
+                contract, physical_urn, schema_assertion_urn, assertion_urns
+            )
+
+    def _emit_logical_contract(
+        self,
+        contract: ODCSContract,
+        logical_urn: str,
+        schema_assertion_urn: Optional[str],
+        assertion_urns: List[str],
+    ) -> Iterable[MetadataWorkUnit]:
+        # The logical dataset is the self-consistent contract home: the assertions
+        # target it, so contract.entity == assertion.entity and results resolve
+        # directly. Emitted for every entry with assertions, bound or not; it
+        # renders under the LOGICAL_MODELS_ENABLED flag.
+        if not self.config.emit_data_contract:
+            return
+        # A contract only means something if it pins at least one assertion.
+        if schema_assertion_urn is None and not assertion_urns:
+            self.report.data_contracts_skipped_no_assertions += 1
+            return
+        yield from self._emit_data_contract(
+            contract,
+            logical_urn,
+            schema_assertion_urn,
+            assertion_urns,
+            is_primary_source=True,
+        )
+
+    def _emit_physical_contract(
+        self,
+        contract: ODCSContract,
+        physical_urn: str,
+        schema_assertion_urn: Optional[str],
+        assertion_urns: List[str],
+    ) -> Iterable[MetadataWorkUnit]:
+        # Opt-in: also surface the contract on the physical table consumers
+        # browse. Off by default and always non-primary — the contract URN
+        # collides with the hand-authored SDK convention, so a primary write here
+        # would overwrite and (on stale removal) soft-delete a user's
+        # hand-authored contract. Gated on emit_logical_parent, the master switch
+        # for writing any aspect onto physical datasets.
+        if not (
+            self.config.emit_physical_data_contract and self.config.emit_logical_parent
+        ):
+            return
+        if schema_assertion_urn is None and not assertion_urns:
+            return
+        yield from self._emit_data_contract(
+            contract,
+            physical_urn,
+            schema_assertion_urn,
+            assertion_urns,
+            is_primary_source=False,
+        )
 
     def _emit_data_contract(
         self,
@@ -821,11 +866,13 @@ class ODCSSource(StatefulIngestionSourceBase):
         entity_urn: str,
         schema_assertion_urn: Optional[str],
         assertion_urns: List[str],
+        is_primary_source: bool,
     ) -> Iterable[MetadataWorkUnit]:
-        # The contract IS owned by ODCS (unlike the physical dataset it may point
-        # at), so it is emitted as a primary source and participates in stale
-        # removal: drop the schema entry and the contract soft-deletes, while the
-        # physical dataset a contract points at is never touched.
+        # is_primary_source drives stale removal. The logical contract is ODCS's
+        # own (primary): drop the schema entry and it soft-deletes. The optional
+        # physical contract collides with the hand-authored SDK urn, so it is
+        # non-primary — ODCS never soft-deletes a contract on a dataset it does
+        # not own.
         contract_urn, contract_mcps = odcs_to_data_contract_mcps(
             contract=contract,
             entity_urn=entity_urn,
@@ -836,7 +883,7 @@ class ODCSSource(StatefulIngestionSourceBase):
             return
         self.report.data_contracts_emitted += 1
         for mcp in contract_mcps:
-            yield mcp.as_workunit()
+            yield mcp.as_workunit(is_primary_source=is_primary_source)
 
     def get_workunits_internal(self) -> Iterable[MetadataWorkUnit]:
         # Emit the odcs platform aspect once per run. Also registered at GMS
