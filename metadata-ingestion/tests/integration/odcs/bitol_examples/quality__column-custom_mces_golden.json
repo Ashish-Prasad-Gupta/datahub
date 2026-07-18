@@ -201,7 +201,8 @@
                     "time": 1705320000000,
                     "actor": "urn:li:corpuser:__datahub_system"
                 }
-            }
+            },
+            "description": "custom on `UniqueID`"
         }
     },
     "systemMetadata": {

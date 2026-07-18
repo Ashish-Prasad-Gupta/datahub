@@ -301,7 +301,8 @@
                     "time": 1705320000000,
                     "actor": "urn:li:corpuser:__datahub_system"
                 }
-            }
+            },
+            "description": "rowCount"
         }
     },
     "systemMetadata": {
@@ -352,7 +353,8 @@
                     "time": 1705320000000,
                     "actor": "urn:li:corpuser:__datahub_system"
                 }
-            }
+            },
+            "description": "rowCount"
         }
     },
     "systemMetadata": {
@@ -404,7 +406,8 @@
                     "time": 1705320000000,
                     "actor": "urn:li:corpuser:__datahub_system"
                 }
-            }
+            },
+            "description": "rowCount"
         }
     },
     "systemMetadata": {
@@ -456,7 +459,8 @@
                     "time": 1705320000000,
                     "actor": "urn:li:corpuser:__datahub_system"
                 }
-            }
+            },
+            "description": "duplicateValues"
         }
     },
     "systemMetadata": {
@@ -514,7 +518,8 @@
                     "time": 1705320000000,
                     "actor": "urn:li:corpuser:__datahub_system"
                 }
-            }
+            },
+            "description": "sql"
         }
     },
     "systemMetadata": {
@@ -698,7 +703,8 @@
                     "time": 1705320000000,
                     "actor": "urn:li:corpuser:__datahub_system"
                 }
-            }
+            },
+            "description": "missingValues on `email`"
         }
     },
     "systemMetadata": {
@@ -768,7 +774,8 @@
                     "time": 1705320000000,
                     "actor": "urn:li:corpuser:__datahub_system"
                 }
-            }
+            },
+            "description": "invalidValues on `status`"
         }
     },
     "systemMetadata": {
@@ -834,7 +841,8 @@
                     "time": 1705320000000,
                     "actor": "urn:li:corpuser:__datahub_system"
                 }
-            }
+            },
+            "description": "nullValues on `status`"
         }
     },
     "systemMetadata": {
@@ -904,7 +912,8 @@
                     "time": 1705320000000,
                     "actor": "urn:li:corpuser:__datahub_system"
                 }
-            }
+            },
+            "description": "invalidValues on `iban`"
         }
     },
     "systemMetadata": {
@@ -975,7 +984,8 @@
                     "time": 1705320000000,
                     "actor": "urn:li:corpuser:__datahub_system"
                 }
-            }
+            },
+            "description": "invalidValues on `profile.country`"
         }
     },
     "systemMetadata": {
@@ -1634,7 +1644,8 @@
                     "time": 1705320000000,
                     "actor": "urn:li:corpuser:__datahub_system"
                 }
-            }
+            },
+            "description": "rowCount"
         }
     },
     "systemMetadata": {

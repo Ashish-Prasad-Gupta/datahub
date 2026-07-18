@@ -1090,6 +1090,19 @@ def _rule_external_url(rule: ODCSQualityRule) -> Optional[str]:
     return None
 
 
+def _rule_display_description(ctx: _RuleContext) -> str:
+    # An assertion's `description` is what the UI shows as its name (assertion
+    # list, dataset Contract tab, etc.). ODCS rules frequently omit a
+    # description, which would otherwise surface as blank / "No description
+    # found", so synthesise a concise label from whatever the rule carries.
+    explicit = _description_to_str(ctx.rule.description)
+    if explicit:
+        return explicit
+    rule = ctx.rule
+    subject = rule.name or rule.effective_metric or rule.type or "quality rule"
+    return f"{subject} on `{ctx.column}`" if ctx.column else subject
+
+
 def _assertion_info_template(
     ctx: _RuleContext, assertion_type: str
 ) -> AssertionInfoClass:
@@ -1097,7 +1110,7 @@ def _assertion_info_template(
     return AssertionInfoClass(
         type=assertion_type,
         source=mce_builder.make_assertion_source(),
-        description=_description_to_str(ctx.rule.description),
+        description=_rule_display_description(ctx),
         customProperties=_custom_props_for_rule(ctx),
         externalUrl=_rule_external_url(ctx.rule),
     )

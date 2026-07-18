@@ -155,7 +155,8 @@
                     "time": 1705320000000,
                     "actor": "urn:li:corpuser:__datahub_system"
                 }
-            }
+            },
+            "description": "shipments_row_count"
         }
     },
     "systemMetadata": {
@@ -220,7 +221,8 @@
                     "time": 1705320000000,
                     "actor": "urn:li:corpuser:__datahub_system"
                 }
-            }
+            },
+            "description": "shipment_id_unique on `shipment_id`"
         }
     },
     "systemMetadata": {
@@ -289,7 +291,8 @@
                     "time": 1705320000000,
                     "actor": "urn:li:corpuser:__datahub_system"
                 }
-            }
+            },
+            "description": "weight_unit_valid on `weight_unit`"
         }
     },
     "systemMetadata": {
@@ -342,7 +345,8 @@
                     "time": 1705320000000,
                     "actor": "urn:li:corpuser:__datahub_system"
                 }
-            }
+            },
+            "description": "carrier_duplicates_tolerated on `carrier`"
         }
     },
     "systemMetadata": {
