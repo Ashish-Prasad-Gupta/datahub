@@ -125,8 +125,8 @@ class ODCSSourceConfig(
     )
     git_info: Optional[GitInfo] = Field(
         default=None,
-        description="Git repository to shallow-clone and scan for ODCS files (SSH deploy key, as "
-        "in the LookML source). When set, each non-URI `path` entry is resolved relative to the "
+        description="Git repository to shallow-clone and scan for ODCS files, authenticated with "
+        "an SSH deploy key. When set, each non-URI `path` entry is resolved relative to the "
         "repository checkout (e.g. `path: contracts/` or `path: '**/*.odcs.yaml'`).",
     )
     server_overrides: List[ServerMapping] = Field(
