@@ -227,6 +227,17 @@ class ODCSSourceConfig(
         "its logical ODCS dataset (the `PhysicalInstanceOf` relationship). Disable to keep ODCS "
         "from writing any aspect onto physical datasets.",
     )
+    emit_data_contract: bool = Field(
+        default=True,
+        description="Whether to emit a native DataHub `dataContract` entity for each schema entry. "
+        "The contract is emitted on the logical `odcs` dataset (the self-consistent home, since the "
+        "assertions target it; it renders under the LOGICAL_MODELS_ENABLED flag) and, when the "
+        "entry binds to a physical dataset, also on that physical dataset so it surfaces on the "
+        "table consumers browse. Both reference the same schema and data-quality Assertion URNs "
+        "(no assertions are duplicated). State mirrors the ODCS `status` (`active` -> ACTIVE, "
+        "otherwise PENDING). Requires at least one of `emit_assertions` / `emit_schema_assertion` "
+        "to have produced an assertion for the entry.",
+    )
     physical_urn_overrides: Dict[str, Dict[str, str]] = Field(
         default_factory=dict,
         description="Map of ODCS contract `id` to a map of `schema[]` entry NAME to an explicit "

@@ -38,8 +38,12 @@ from datahub.metadata.schema_classes import (
     BooleanTypeClass,
     BytesTypeClass,
     CustomAssertionInfoClass,
+    DataContractPropertiesClass,
+    DataContractStateClass,
+    DataContractStatusClass,
     DataPlatformInfoClass,
     DataPlatformInstanceClass,
+    DataQualityContractClass,
     DatasetPropertiesClass,
     DateTypeClass,
     EdgeClass,
@@ -67,12 +71,14 @@ from datahub.metadata.schema_classes import (
     RowCountTotalClass,
     SchemaAssertionCompatibilityClass,
     SchemaAssertionInfoClass,
+    SchemaContractClass,
     SchemaFieldClass,
     SchemaFieldDataTypeClass,
     SchemaFieldSpecClass,
     SchemaMetadataClass,
     SqlAssertionInfoClass,
     SqlAssertionTypeClass,
+    StatusClass,
     StringTypeClass,
     TagAssociationClass,
     TimeTypeClass,
@@ -1512,3 +1518,60 @@ def odcs_to_schema_assertion_mcps(
         MetadataChangeProposalWrapper(entityUrn=assertion_urn, aspect=info),
         assertion_platform_instance_mcp(assertion_urn),
     ]
+
+
+def odcs_data_contract_urn(entity_urn: str) -> str:
+    # Stable per target dataset and identical to the convention the DataContract
+    # SDK uses, so a hand-authored contract and the ODCS-derived one collapse to
+    # the same urn instead of racing as duplicates. Because the urn is keyed on
+    # the entity, the logical and physical contracts are distinct entities.
+    return f"urn:li:dataContract:{datahub_guid({'entity': entity_urn})}"
+
+
+def odcs_to_data_contract_mcps(
+    contract: ODCSContract,
+    entity_urn: str,
+    schema_assertion_urn: Optional[str],
+    data_quality_assertion_urns: List[str],
+) -> Tuple[Optional[str], List[MetadataChangeProposalWrapper]]:
+    """Emit a native DataHub `dataContract` on `entity_urn`.
+
+    Both the logical `odcs` dataset (where the assertions actually live — the
+    self-consistent home) and the bound physical dataset (where consumers browse)
+    use this: the contract just references the schema and data-quality assertion
+    urns, never duplicating assertion entities. State mirrors ODCS `status`
+    (`active` -> ACTIVE, otherwise PENDING). Returns (None, []) when the entry
+    produced no assertions worth pinning a contract to.
+    """
+    schema_contracts = (
+        [SchemaContractClass(assertion=schema_assertion_urn)]
+        if schema_assertion_urn
+        else None
+    )
+    dq_contracts = [
+        DataQualityContractClass(assertion=urn) for urn in data_quality_assertion_urns
+    ]
+    if schema_contracts is None and not dq_contracts:
+        return None, []
+
+    contract_urn = odcs_data_contract_urn(entity_urn)
+    state = (
+        DataContractStateClass.ACTIVE
+        if (contract.status or "").strip().lower() == "active"
+        else DataContractStateClass.PENDING
+    )
+    mcps = list(
+        MetadataChangeProposalWrapper.construct_many(
+            entityUrn=contract_urn,
+            aspects=[
+                DataContractPropertiesClass(
+                    entity=entity_urn,
+                    schema=schema_contracts,
+                    dataQuality=dq_contracts or None,
+                ),
+                StatusClass(removed=False),
+                DataContractStatusClass(state=state),
+            ],
+        )
+    )
+    return contract_urn, mcps
