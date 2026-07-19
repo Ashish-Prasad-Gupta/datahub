@@ -20,6 +20,9 @@ from datahub.ingestion.glossary.classification_mixin import (
 )
 from datahub.ingestion.source.ge_profiling_config import GEProfilingConfig
 from datahub.ingestion.source.sql.sqlalchemy_uri import make_sqlalchemy_uri
+from datahub.ingestion.source.state.resource_fingerprint import (
+    ResourceChangeDetectionConfig,
+)
 from datahub.ingestion.source.state.stale_entity_removal_handler import (
     StatefulStaleMetadataRemovalConfig,
 )
@@ -29,6 +32,15 @@ from datahub.ingestion.source.state.stateful_ingestion_base import (
 from datahub.ingestion.source_config.operation_config import is_profiling_enabled
 
 logger: logging.Logger = logging.getLogger(__name__)
+
+
+class SchemaChangeDetectionConfig(ResourceChangeDetectionConfig):
+    enabled: bool = Field(
+        default=False,
+        description="Enable a lightweight per-schema fingerprint check that skips expensive "
+        "table/column introspection for schemas that have not structurally changed since the "
+        "last run. Requires `stateful_ingestion.enabled` to be set to true.",
+    )
 
 
 class SQLFilterConfig(ConfigModel):
@@ -116,10 +128,28 @@ class SQLCommonConfig(
     # Custom Stateful Ingestion settings
     stateful_ingestion: Optional[StatefulStaleMetadataRemovalConfig] = None
 
+    schema_change_detection: SchemaChangeDetectionConfig = Field(
+        default_factory=SchemaChangeDetectionConfig,
+        description="Configuration for lightweight schema change detection, used to skip "
+        "expensive re-introspection of schemas that have not changed since the last run.",
+    )
+
     def is_profiling_enabled(self) -> bool:
         return self.profiling.enabled and is_profiling_enabled(
             self.profiling.operation_config
         )
+
+    @model_validator(mode="after")
+    def validate_schema_change_detection_requires_stateful_ingestion(self):
+        if self.schema_change_detection.enabled and (
+            not self.stateful_ingestion or not self.stateful_ingestion.enabled
+        ):
+            raise ValueError(
+                "schema_change_detection.enabled requires stateful_ingestion.enabled to be "
+                "set to true, since the fingerprint gate relies on the stateful ingestion "
+                "checkpoint mechanism."
+            )
+        return self
 
     @model_validator(mode="after")
     def ensure_profiling_pattern_is_passed_to_profiling(self):

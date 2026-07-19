@@ -29,6 +29,9 @@ from datahub.ingestion.api.incremental_properties_helper import (
 )
 from datahub.ingestion.source.ge_profiling_config import GEProfilingConfig
 from datahub.ingestion.source.sql.sql_config import SQLCommonConfig
+from datahub.ingestion.source.state.resource_fingerprint import (
+    ResourceChangeDetectionConfig,
+)
 from datahub.ingestion.source.state.stale_entity_removal_handler import (
     StatefulStaleMetadataRemovalConfig,
 )
@@ -190,6 +193,18 @@ class FederationConnectionDetail(ConfigModel):
         if v is not None and v.upper() not in ALL_ENV_TYPES:
             raise ValueError(f"env must be one of {ALL_ENV_TYPES}, found {v}")
         return v.upper() if v is not None else v
+
+
+class TableChangeDetectionConfig(ResourceChangeDetectionConfig):
+    enabled: bool = Field(
+        default=False,
+        description="Enable a lightweight per-table fingerprint check, based on Unity "
+        "Catalog's native `updated_at` timestamp, that skips expensive per-table "
+        "processing (lineage, tags, MCP construction, and profiling) for tables that "
+        "have not changed since the last run. Does not apply to the legacy "
+        "`hive_metastore` catalog. Requires `stateful_ingestion.enabled` to be set to "
+        "true.",
+    )
 
 
 class UnityCatalogSourceConfig(
@@ -627,6 +642,12 @@ class UnityCatalogSourceConfig(
         default=None, description="Unity Catalog Stateful Ingestion Config."
     )
 
+    change_detection: TableChangeDetectionConfig = Field(
+        default_factory=TableChangeDetectionConfig,
+        description="Configuration for lightweight, per-table change detection, used to "
+        "skip expensive re-processing of tables that have not changed since the last run.",
+    )
+
     def _validate_start_time_window(self) -> None:
         # Called at the end of set_warehouse_id_from_profiling so self.warehouse_id is
         # already resolved from profiling before this check runs.
@@ -792,6 +813,18 @@ class UnityCatalogSourceConfig(
             )
             logger.warning(msg)
             add_global_warning(msg)
+        return self
+
+    @model_validator(mode="after")
+    def validate_change_detection_requires_stateful_ingestion(self):
+        if self.change_detection.enabled and (
+            not self.stateful_ingestion or not self.stateful_ingestion.enabled
+        ):
+            raise ValueError(
+                "change_detection.enabled requires stateful_ingestion.enabled to be set "
+                "to true, since the fingerprint gate relies on the stateful ingestion "
+                "checkpoint mechanism."
+            )
         return self
 
     @field_validator("schema_pattern", mode="after")

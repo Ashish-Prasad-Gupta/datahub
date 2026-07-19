@@ -2,6 +2,7 @@ import contextlib
 import datetime
 import logging
 import traceback
+from collections import defaultdict
 from dataclasses import dataclass, field
 from functools import partial
 from typing import (
@@ -40,12 +41,14 @@ from datahub.ingestion.api.common import PipelineContext
 from datahub.ingestion.api.decorators import capability
 from datahub.ingestion.api.source import (
     CapabilityReport,
+    MetadataWorkUnitProcessor,
     SourceCapability,
     TestableSource,
     TestConnectionReport,
 )
 from datahub.ingestion.api.source_protocols import MetadataWorkUnitIterable
 from datahub.ingestion.api.workunit import MetadataWorkUnit
+from datahub.ingestion.api.workunit_processor import WorkunitProcessor
 from datahub.ingestion.glossary.classification_mixin import (
     SAMPLE_SIZE_MULTIPLIER,
     ClassificationHandler,
@@ -80,8 +83,20 @@ from datahub.ingestion.source.sql.stored_procedures.base import (
     generate_procedure_container_workunits,
     generate_procedure_workunits,
 )
+from datahub.ingestion.source.state.entity_removal_state import GenericCheckpointState
+from datahub.ingestion.source.state.resource_fingerprint import (
+    ResourceFingerprintHandler,
+    compute_fingerprint,
+)
+from datahub.ingestion.source.state.stale_entity_removal_handler import (
+    StaleEntityRemovalHandler,
+    auto_stale_entity_removal,
+)
 from datahub.ingestion.source.state.stateful_ingestion_base import (
     StatefulIngestionSourceBase,
+)
+from datahub.ingestion.workunit_processors.auto_stale_entity_removal import (
+    AutoStaleEntityRemovalProcessor,
 )
 from datahub.metadata.schema_classes import (
     ArrayTypeClass,
@@ -366,6 +381,8 @@ class SQLAlchemySource(StatefulIngestionSourceBase, TestableSource):
 
         self.views_failed_parsing: Set[str] = set()
 
+        self._schema_fingerprint_cache: Dict[str, Dict[str, str]] = {}
+
         self.discovered_datasets: Set[str] = set()
         self.aggregator = self._create_aggregator()
         self.report.sql_aggregator = self.aggregator.report
@@ -441,6 +458,46 @@ class SQLAlchemySource(StatefulIngestionSourceBase, TestableSource):
             else:
                 self.add_information_for_schema(inspector, schema)
                 yield schema
+
+    def get_schema_fingerprints(
+        self, inspector: Inspector, db_name: str
+    ) -> Dict[str, str]:
+        """
+        Computes a cheap structural fingerprint per schema in this database,
+        from a single query against the column catalog. Used by the
+        schema-change-detection gate (`schema_change_detection.enabled`) to skip
+        expensive per-table introspection for schemas that have not changed
+        since the last run. Subclasses without a usable ANSI `information_schema`
+        (e.g. Oracle) should override this.
+        """
+        columns_by_schema: Dict[str, List[Tuple[Any, ...]]] = defaultdict(list)
+        with inspector.engine.connect() as conn:
+            rows = conn.execute(
+                "SELECT table_schema, table_name, column_name, ordinal_position, data_type "
+                "FROM information_schema.columns"
+            )
+            for row in rows:
+                row_tuple = tuple(row)
+                columns_by_schema[row_tuple[0]].append(row_tuple[1:])
+        return {
+            schema: compute_fingerprint(rows)
+            for schema, rows in columns_by_schema.items()
+        }
+
+    def _get_schema_fingerprint(
+        self, inspector: Inspector, db_name: str
+    ) -> Dict[str, str]:
+        if db_name not in self._schema_fingerprint_cache:
+            try:
+                self._schema_fingerprint_cache[db_name] = self.get_schema_fingerprints(
+                    inspector, db_name
+                )
+            except Exception as e:
+                logger.debug(
+                    f"Failed to compute schema fingerprints for database {db_name}: {e}"
+                )
+                self._schema_fingerprint_cache[db_name] = {}
+        return self._schema_fingerprint_cache[db_name]
 
     def gen_database_containers(
         self,
@@ -529,11 +586,51 @@ class SQLAlchemySource(StatefulIngestionSourceBase, TestableSource):
     ) -> Iterable[Union[MetadataWorkUnit, SqlWorkUnit]]:
         yield from self.gen_schema_containers(schema=schema, database=database)
 
+        fingerprint: Optional[str] = None
+        if self.config.schema_change_detection.enabled:
+            schema_urn = gen_schema_key(
+                db_name=database,
+                schema=schema,
+                platform=self.platform,
+                platform_instance=self.config.platform_instance,
+                env=self.config.env,
+            ).as_urn()
+            fingerprint = self._get_schema_fingerprint(inspector, database).get(schema)
+
+            if self.schema_fingerprint_handler.should_skip_resource(
+                schema_urn, fingerprint
+            ):
+                carried_urns = self.schema_fingerprint_handler.carry_forward_resource(
+                    schema_urn
+                )
+                logger.info(
+                    f"Schema {database}.{schema} is unchanged since the last run "
+                    f"(fingerprint match); skipping table/column introspection and "
+                    f"carrying forward {len(carried_urns)} entities."
+                )
+                for urn in carried_urns:
+                    self.stale_entity_removal_handler.add_entity_to_state(
+                        "dataset", urn
+                    )
+                return
+
+        emitted_urns: List[str] = []
         if self.config.include_tables:
-            yield from self.loop_tables(inspector, schema, self.config)
+            for wu in self.loop_tables(inspector, schema, self.config):
+                if fingerprint is not None and wu.is_primary_source:
+                    emitted_urns.append(wu.get_urn())
+                yield wu
 
         if self.config.include_views:
-            yield from self.loop_views(inspector, schema, self.config)
+            for wu in self.loop_views(inspector, schema, self.config):
+                if fingerprint is not None and wu.is_primary_source:
+                    emitted_urns.append(wu.get_urn())
+                yield wu
+
+        if fingerprint is not None:
+            self.schema_fingerprint_handler.record_full_refresh(
+                schema_urn, fingerprint, emitted_urns
+            )
 
         if getattr(self.config, "include_stored_procedures", False):
             try:
@@ -552,6 +649,39 @@ class SQLAlchemySource(StatefulIngestionSourceBase, TestableSource):
                     context=f"{database}.{schema}",
                     exc=e,
                 )
+
+    def get_excluded_workunit_processors(
+        self,
+    ) -> "List[Union[str, Type[WorkunitProcessor]]]":
+        if self.config.schema_change_detection.enabled:
+            # Stale removal is wired manually below so the handler instance is
+            # shared with this source; exclude the framework's automatic processor.
+            return [AutoStaleEntityRemovalProcessor]
+        return []
+
+    def get_workunit_processors(self) -> List[Optional[MetadataWorkUnitProcessor]]:
+        processors = list(super().get_workunit_processors())
+        if self.config.schema_change_detection.enabled:
+            self.schema_fingerprint_handler = ResourceFingerprintHandler.create(
+                self,
+                self.config,
+                self.config.schema_change_detection,
+                self.ctx,
+                job_id_suffix="schema_fingerprint",
+            )
+            self.stale_entity_removal_handler = StaleEntityRemovalHandler(
+                state_provider=self.state_provider,
+                report=self.report,
+                config=self.config,
+                state_type_class=GenericCheckpointState,
+                pipeline_name=self.ctx.pipeline_name,
+                run_id=self.ctx.run_id,
+                platform=self.platform,
+            )
+            processors.append(
+                partial(auto_stale_entity_removal, self.stale_entity_removal_handler)
+            )
+        return processors
 
     def get_workunits_internal(self) -> Iterable[Union[MetadataWorkUnit, SqlWorkUnit]]:
         sql_config = self.config

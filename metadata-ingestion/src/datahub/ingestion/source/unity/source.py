@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import time
+from functools import partial
 from typing import (
     AbstractSet,
     Any,
@@ -14,6 +15,7 @@ from typing import (
     Optional,
     Set,
     Tuple,
+    Type,
     Union,
     cast,
 )
@@ -59,11 +61,13 @@ from datahub.ingestion.api.decorators import (
     support_status,
 )
 from datahub.ingestion.api.source import (
+    MetadataWorkUnitProcessor,
     SourceCapability,
     TestableSource,
     TestConnectionReport,
 )
 from datahub.ingestion.api.workunit import MetadataWorkUnit
+from datahub.ingestion.api.workunit_processor import WorkunitProcessor
 from datahub.ingestion.source.aws import s3_util
 from datahub.ingestion.source.aws.s3_util import (
     make_s3_urn_for_lineage,
@@ -73,6 +77,14 @@ from datahub.ingestion.source.common.subtypes import (
     DatasetContainerSubTypes,
     DatasetSubTypes,
     SourceCapabilityModifier,
+)
+from datahub.ingestion.source.state.entity_removal_state import GenericCheckpointState
+from datahub.ingestion.source.state.resource_fingerprint import (
+    ResourceFingerprintHandler,
+)
+from datahub.ingestion.source.state.stale_entity_removal_handler import (
+    StaleEntityRemovalHandler,
+    auto_stale_entity_removal,
 )
 from datahub.ingestion.source.state.stateful_ingestion_base import (
     StatefulIngestionSourceBase,
@@ -121,6 +133,9 @@ from datahub.ingestion.source.unity.tag_entities import (
     UnityCatalogTagPlatformResourceId,
 )
 from datahub.ingestion.source.unity.usage import UnityCatalogUsageExtractor
+from datahub.ingestion.workunit_processors.auto_stale_entity_removal import (
+    AutoStaleEntityRemovalProcessor,
+)
 from datahub.metadata.com.linkedin.pegasus2avro.common import (
     GlobalTags,
     MetadataAttribution,
@@ -577,6 +592,39 @@ class UnityCatalogSource(StatefulIngestionSourceBase, TestableSource):
         config = UnityCatalogSourceConfig.model_validate(config_dict)
         return cls(ctx=ctx, config=config)
 
+    def get_excluded_workunit_processors(
+        self,
+    ) -> "List[Union[str, Type[WorkunitProcessor]]]":
+        if self.config.change_detection.enabled:
+            # Stale removal is wired manually below so the handler instance is
+            # shared with this source; exclude the framework's automatic processor.
+            return [AutoStaleEntityRemovalProcessor]
+        return []
+
+    def get_workunit_processors(self) -> List[Optional[MetadataWorkUnitProcessor]]:
+        processors = list(super().get_workunit_processors())
+        if self.config.change_detection.enabled:
+            self.table_fingerprint_handler = ResourceFingerprintHandler.create(
+                self,
+                self.config,
+                self.config.change_detection,
+                self.ctx,
+                job_id_suffix="table_fingerprint",
+            )
+            self.stale_entity_removal_handler = StaleEntityRemovalHandler(
+                state_provider=self.state_provider,
+                report=self.report,
+                config=self.config,
+                state_type_class=GenericCheckpointState,
+                pipeline_name=self.ctx.pipeline_name,
+                run_id=self.ctx.run_id,
+                platform=self.platform,
+            )
+            processors.append(
+                partial(auto_stale_entity_removal, self.stale_entity_removal_handler)
+            )
+        return processors
+
     def get_workunits_internal(self) -> Iterable[MetadataWorkUnit]:
         with self.report.new_stage("Ingestion Setup"):
             wait_on_warehouse = None
@@ -854,6 +902,27 @@ class UnityCatalogSource(StatefulIngestionSourceBase, TestableSource):
                 self.report.tables.dropped(table.id, f"table ({table.table_type})")
                 continue
 
+            dataset_urn = self.gen_dataset_urn(table.ref)
+            fingerprint: Optional[str] = None
+            if self.config.change_detection.enabled and not isinstance(
+                table.table_type, HiveTableType
+            ):
+                fingerprint = (
+                    str(table.updated_at.timestamp()) if table.updated_at else None
+                )
+                if self.table_fingerprint_handler.should_skip_resource(
+                    dataset_urn, fingerprint
+                ):
+                    self.table_fingerprint_handler.carry_forward_resource(dataset_urn)
+                    self.stale_entity_removal_handler.add_entity_to_state(
+                        "dataset", dataset_urn
+                    )
+                    self.report.num_tables_change_detection_skipped += 1
+                    self.report.tables.processed(
+                        table.id, f"table ({table.table_type}, unchanged)"
+                    )
+                    continue
+
             if (
                 self.config.is_profiling_enabled()
                 and self.config.uses_table_level_profiler()
@@ -873,6 +942,11 @@ class UnityCatalogSource(StatefulIngestionSourceBase, TestableSource):
             self.report.tables.processed(table.id, f"table ({table.table_type})")
             if table.is_metric_view and self.config.include_metric_views:
                 self.report.metric_views.processed(table.id)
+
+            if fingerprint is not None:
+                self.table_fingerprint_handler.record_full_refresh(
+                    dataset_urn, fingerprint, [dataset_urn]
+                )
 
     def process_table(self, table: Table, schema: Schema) -> Iterable[MetadataWorkUnit]:
         dataset_urn = self.gen_dataset_urn(table.ref)

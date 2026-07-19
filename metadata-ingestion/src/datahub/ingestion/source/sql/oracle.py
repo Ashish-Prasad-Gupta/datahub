@@ -75,6 +75,7 @@ from datahub.ingestion.source.sql.stored_procedures.base import (
     generate_procedure_workunits,
     get_procedure_flow_name,
 )
+from datahub.ingestion.source.state.resource_fingerprint import compute_fingerprint
 from datahub.ingestion.source.usage.usage_common import BaseUsageConfig
 from datahub.ingestion.source_report.ingestion_stage import (
     LINEAGE_EXTRACTION,
@@ -1486,6 +1487,32 @@ class OracleSource(SQLAlchemySource):
                 )
             else:
                 yield inspector
+
+    def get_schema_fingerprints(
+        self, inspector: Inspector, db_name: str
+    ) -> Dict[str, str]:
+        """
+        Oracle has no reliable ANSI information_schema, so this queries
+        {ALL,DBA}_TAB_COLUMNS instead (respecting `data_dictionary_mode`) for the
+        schema-change-detection fingerprint gate.
+        """
+        tables_prefix = self.config.data_dictionary_mode.value
+        self._validate_tables_prefix(tables_prefix)
+
+        columns_by_schema: Dict[str, List[Tuple[Any, ...]]] = defaultdict(list)
+        query = sql.text(
+            f"SELECT owner, table_name, column_name, column_id, data_type "
+            f"FROM {tables_prefix}_TAB_COLUMNS "
+            f"WHERE owner NOT IN ({_SYSTEM_SCHEMAS_SQL})"
+        )
+        rows = inspector.bind.execute(query)
+        for row in rows:
+            row_tuple = tuple(row)
+            columns_by_schema[row_tuple[0]].append(row_tuple[1:])
+        return {
+            schema: compute_fingerprint(rows)
+            for schema, rows in columns_by_schema.items()
+        }
 
     def get_db_schema(self, dataset_identifier: str) -> Tuple[Optional[str], str]:
         try:
