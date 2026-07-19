@@ -519,8 +519,11 @@ def test_freshness_assertion_emitted_from_frequency_sla(
 
     freshness = _freshness_infos(workunits)
     assert len(freshness) == 1
-    schedule = freshness[0].freshnessAssertion.schedule
+    freshness_assertion = freshness[0].freshnessAssertion
+    assert freshness_assertion is not None
+    schedule = freshness_assertion.schedule
     assert schedule.type == FreshnessAssertionScheduleTypeClass.FIXED_INTERVAL
+    assert schedule.fixedInterval is not None
     assert schedule.fixedInterval.unit == CalendarIntervalClass.DAY
     assert schedule.fixedInterval.multiple == 1
     assert src.report.freshness_assertions_emitted == 1
