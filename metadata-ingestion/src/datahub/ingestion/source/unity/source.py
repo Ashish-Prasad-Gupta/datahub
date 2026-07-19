@@ -61,6 +61,9 @@ from datahub.ingestion.source.common.subtypes import (
     DatasetSubTypes,
     SourceCapabilityModifier,
 )
+from datahub.ingestion.source.state.resource_fingerprint import (
+    ResourceFingerprintHandler,
+)
 from datahub.ingestion.source.state.stale_entity_removal_handler import (
     StaleEntityRemovalHandler,
 )
@@ -324,11 +327,19 @@ class UnityCatalogSource(StatefulIngestionSourceBase, TestableSource):
         return cls(ctx=ctx, config=config)
 
     def get_workunit_processors(self) -> List[Optional[MetadataWorkUnitProcessor]]:
+        self.stale_entity_removal_handler = StaleEntityRemovalHandler.create(
+            self, self.config, self.ctx
+        )
+        self.table_fingerprint_handler = ResourceFingerprintHandler.create(
+            self,
+            self.config,
+            self.config.change_detection,
+            self.ctx,
+            job_id_suffix="table_fingerprint",
+        )
         return [
             *super().get_workunit_processors(),
-            StaleEntityRemovalHandler.create(
-                self, self.config, self.ctx
-            ).workunit_processor,
+            self.stale_entity_removal_handler.workunit_processor,
         ]
 
     def get_workunits_internal(self) -> Iterable[MetadataWorkUnit]:
@@ -558,6 +569,27 @@ class UnityCatalogSource(StatefulIngestionSourceBase, TestableSource):
                 self.report.tables.dropped(table.id, f"table ({table.table_type})")
                 continue
 
+            dataset_urn = self.gen_dataset_urn(table.ref)
+            fingerprint: Optional[str] = None
+            if self.config.change_detection.enabled and not isinstance(
+                table.table_type, HiveTableType
+            ):
+                fingerprint = (
+                    str(table.updated_at.timestamp()) if table.updated_at else None
+                )
+                if self.table_fingerprint_handler.should_skip_resource(
+                    dataset_urn, fingerprint
+                ):
+                    self.table_fingerprint_handler.carry_forward_resource(dataset_urn)
+                    self.stale_entity_removal_handler.add_entity_to_state(
+                        "dataset", dataset_urn
+                    )
+                    self.report.num_tables_change_detection_skipped += 1
+                    self.report.tables.processed(
+                        table.id, f"table ({table.table_type}, unchanged)"
+                    )
+                    continue
+
             if (
                 self.config.is_profiling_enabled()
                 and self.config.is_ge_profiling()
@@ -574,6 +606,11 @@ class UnityCatalogSource(StatefulIngestionSourceBase, TestableSource):
                 self.table_refs.add(table.ref)
             yield from self.process_table(table, schema)
             self.report.tables.processed(table.id, f"table ({table.table_type})")
+
+            if fingerprint is not None:
+                self.table_fingerprint_handler.record_full_refresh(
+                    dataset_urn, fingerprint, [dataset_urn]
+                )
 
     def process_table(self, table: Table, schema: Schema) -> Iterable[MetadataWorkUnit]:
         dataset_urn = self.gen_dataset_urn(table.ref)

@@ -100,6 +100,67 @@ sink:
     server: "http://localhost:8080"
 ```
 
+### Schema Change Detection
+
+For relational sources, ingestion normally does a full re-introspection of every database, schema, table, and
+column on every run. When a recipe is scheduled to run frequently (e.g. every few minutes) to catch metadata
+changes quickly, this full re-introspection cost adds up across many databases.
+
+Schema change detection adds a lightweight, per-schema fingerprint check ahead of the expensive table/column
+introspection. The fingerprint is a hash of each schema's column catalog (table, column, ordinal position, data
+type), computed with a single cheap catalog query. If a schema's fingerprint matches the last checkpointed value,
+table/column introspection is skipped for that schema and its previously known entities are carried forward, so
+stale-entity removal doesn't treat them as deleted. Database and schema enumeration is never skipped, so dropped
+databases/schemas are still detected on every run.
+
+Because carried-forward entities don't get a refreshed `lastObserved` timestamp on skipped runs,
+`full_refresh_interval_hours` forces a full re-introspection of every schema at least that often, regardless of
+whether its fingerprint changed.
+
+**Known limitations**: view/stored-procedure body changes without a column change are not detected by the
+fingerprint. On platforms without a reliable native DDL-change signal (e.g. Postgres), correctness depends
+entirely on the column-catalog hash; `full_refresh_interval_hours` is the safety net against a missed change.
+
+#### Supported sources
+
+- All SQLAlchemy-based SQL sources (MySQL, PostgreSQL, SQL Server, Oracle, etc.)
+
+#### Additional config details
+
+Note that a `.` is used to denote nested fields in the YAML recipe.
+
+| Field                                                 | Required | Default | Description                                                                                          |
+| ----------------------------------------------------- | -------- | ------- | ---------------------------------------------------------------------------------------------------- |
+| `schema_change_detection.enabled`                     |          | False   | Enables the fingerprint-based schema-change-detection gate. Requires `stateful_ingestion.enabled`.   |
+| `schema_change_detection.full_refresh_interval_hours` |          | 24      | Force a full re-introspection of a schema at least this often, even if its fingerprint is unchanged. |
+
+#### Sample configuration
+
+```yaml
+source:
+  type: "postgres"
+  config:
+    username: <user_name>
+    password: <password>
+    host_port: <host_port>
+    database: <database>
+    include_tables: True
+    include_views: True
+    # Rest of the source specific params ...
+    schema_change_detection:
+      enabled: True # False by default
+      full_refresh_interval_hours: 24 # default value
+    ## Stateful Ingestion config (required) ##
+    stateful_ingestion:
+      enabled: True # False by default
+
+pipeline_name: "my_postgres_pipeline_1"
+sink:
+  type: "datahub-rest"
+  config:
+    server: "http://localhost:8080"
+```
+
 ### Redundant Run Elimination
 
 Typically, the usage runs are configured to fetch the usage data for the previous day(or hour) for each run. Once a usage

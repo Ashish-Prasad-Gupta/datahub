@@ -82,6 +82,24 @@ def test_use_source_schema_for_foreign_key_if_not_specified():
     ]
 
 
+def test_schema_change_detection_requires_stateful_ingestion() -> None:
+    with pytest.raises(ValueError, match="requires stateful_ingestion.enabled"):
+        _TestSQLAlchemyConfig.model_validate(
+            {"schema_change_detection": {"enabled": True}}
+        )
+
+
+def test_schema_change_detection_allowed_with_stateful_ingestion() -> None:
+    config = _TestSQLAlchemyConfig.model_validate(
+        {
+            "schema_change_detection": {"enabled": True},
+            "stateful_ingestion": {"enabled": True},
+        }
+    )
+    assert config.schema_change_detection.enabled
+    assert config.schema_change_detection.full_refresh_interval_hours == 24
+
+
 PLATFORM_FROM_SQLALCHEMY_URI_TEST_CASES: Dict[str, str] = {
     "awsathena://test_athena:3316/athenadb": "athena",
     "bigquery://test_bq:3316/bigquery": "bigquery",
