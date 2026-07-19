@@ -25,6 +25,7 @@ from datahub.ingestion.source.odcs.odcs_models import (
     ODCSQualityRule,
     ODCSSchemaObject,
     ODCSServer,
+    ODCSSlaProperty,
 )
 from datahub.metadata.schema_classes import (
     ArrayTypeClass,
@@ -37,6 +38,7 @@ from datahub.metadata.schema_classes import (
     AuditStampClass,
     BooleanTypeClass,
     BytesTypeClass,
+    CalendarIntervalClass,
     CustomAssertionInfoClass,
     DataContractPropertiesClass,
     DataContractStateClass,
@@ -55,6 +57,12 @@ from datahub.metadata.schema_classes import (
     FieldValuesAssertionClass,
     FieldValuesFailThresholdClass,
     FieldValuesFailThresholdTypeClass,
+    FixedIntervalScheduleClass,
+    FreshnessAssertionInfoClass,
+    FreshnessAssertionScheduleClass,
+    FreshnessAssertionScheduleTypeClass,
+    FreshnessAssertionTypeClass,
+    FreshnessContractClass,
     GlobalTagsClass,
     InstitutionalMemoryClass,
     InstitutionalMemoryMetadataClass,
@@ -1533,6 +1541,115 @@ def odcs_to_schema_assertion_mcps(
     ]
 
 
+_FREQUENCY_SLA_PROPERTY = "frequency"
+
+# ODCS SLA `unit` tokens -> DataHub CalendarInterval. The bare "m" is
+# deliberately absent (minute vs month is ambiguous in ODCS); an unmappable
+# unit skips freshness rather than guessing.
+_SLA_UNIT_TO_CALENDAR_INTERVAL: Dict[str, str] = {
+    "s": CalendarIntervalClass.SECOND,
+    "sec": CalendarIntervalClass.SECOND,
+    "second": CalendarIntervalClass.SECOND,
+    "seconds": CalendarIntervalClass.SECOND,
+    "min": CalendarIntervalClass.MINUTE,
+    "minute": CalendarIntervalClass.MINUTE,
+    "minutes": CalendarIntervalClass.MINUTE,
+    "h": CalendarIntervalClass.HOUR,
+    "hr": CalendarIntervalClass.HOUR,
+    "hour": CalendarIntervalClass.HOUR,
+    "hours": CalendarIntervalClass.HOUR,
+    "d": CalendarIntervalClass.DAY,
+    "day": CalendarIntervalClass.DAY,
+    "days": CalendarIntervalClass.DAY,
+    "w": CalendarIntervalClass.WEEK,
+    "week": CalendarIntervalClass.WEEK,
+    "weeks": CalendarIntervalClass.WEEK,
+    "mo": CalendarIntervalClass.MONTH,
+    "month": CalendarIntervalClass.MONTH,
+    "months": CalendarIntervalClass.MONTH,
+    "q": CalendarIntervalClass.QUARTER,
+    "quarter": CalendarIntervalClass.QUARTER,
+    "y": CalendarIntervalClass.YEAR,
+    "yr": CalendarIntervalClass.YEAR,
+    "year": CalendarIntervalClass.YEAR,
+    "years": CalendarIntervalClass.YEAR,
+}
+
+
+def _frequency_sla(contract: ODCSContract) -> Optional[ODCSSlaProperty]:
+    for sla in contract.slaProperties or []:
+        if (sla.property or "").strip().lower() == _FREQUENCY_SLA_PROPERTY:
+            return sla
+    return None
+
+
+def _fixed_interval_from_sla(
+    sla: ODCSSlaProperty,
+) -> Optional[FixedIntervalScheduleClass]:
+    unit = _SLA_UNIT_TO_CALENDAR_INTERVAL.get((sla.unit or "").strip().lower())
+    if unit is None or not _is_plain_number(sla.value):
+        return None
+    multiple = int(sla.value)
+    if multiple <= 0:
+        return None
+    return FixedIntervalScheduleClass(unit=unit, multiple=multiple)
+
+
+def odcs_freshness_assertion_urn(contract: ODCSContract, entity_urn: str) -> str:
+    return make_assertion_urn(
+        datahub_guid(
+            {"contract": contract.id, "dataset": entity_urn, "kind": "freshness"}
+        )
+    )
+
+
+def odcs_to_freshness_assertion_mcps(
+    contract: ODCSContract,
+    entity_urn: str,
+) -> Tuple[Optional[str], List[MetadataChangeProposalWrapper]]:
+    """Emit a FRESHNESS assertion from the contract's `frequency` SLA.
+
+    ODCS declares refresh cadence contract-wide via `slaProperties[]
+    {property: frequency}`, so it governs every logical dataset the contract
+    materializes. It maps to a DATASET_CHANGE assertion on a FIXED_INTERVAL
+    schedule (frequency 1 unit `d` -> "changes at least every 1 day"). The SLA
+    `element` is measurement detail, recorded as a custom property rather than
+    used to target a specific entry. Returns (None, []) when there is no
+    `frequency` SLA or its unit is not a calendar interval we can express.
+    """
+    sla = _frequency_sla(contract)
+    if sla is None:
+        return None, []
+    schedule = _fixed_interval_from_sla(sla)
+    if schedule is None:
+        return None, []
+    custom_props = {"odcs.id": contract.id, "odcs.sla": _FREQUENCY_SLA_PROPERTY}
+    if sla.element:
+        custom_props["odcs.sla.element"] = sla.element
+    assertion_urn = odcs_freshness_assertion_urn(contract, entity_urn)
+    info = AssertionInfoClass(
+        type=AssertionTypeClass.FRESHNESS,
+        source=mce_builder.make_assertion_source(),
+        description=(
+            f"Freshness SLA from ODCS contract '{contract.id}': data changes at "
+            f"least every {schedule.multiple} {str(schedule.unit).lower()}"
+        ),
+        customProperties=custom_props,
+        freshnessAssertion=FreshnessAssertionInfoClass(
+            type=FreshnessAssertionTypeClass.DATASET_CHANGE,
+            entity=entity_urn,
+            schedule=FreshnessAssertionScheduleClass(
+                type=FreshnessAssertionScheduleTypeClass.FIXED_INTERVAL,
+                fixedInterval=schedule,
+            ),
+        ),
+    )
+    return assertion_urn, [
+        MetadataChangeProposalWrapper(entityUrn=assertion_urn, aspect=info),
+        assertion_platform_instance_mcp(assertion_urn),
+    ]
+
+
 def odcs_data_contract_urn(entity_urn: str) -> str:
     # Stable per target dataset and identical to the convention the DataContract
     # SDK uses, so a hand-authored contract and the ODCS-derived one collapse to
@@ -1546,25 +1663,31 @@ def odcs_to_data_contract_mcps(
     entity_urn: str,
     schema_assertion_urn: Optional[str],
     data_quality_assertion_urns: List[str],
+    freshness_assertion_urn: Optional[str] = None,
 ) -> Tuple[Optional[str], List[MetadataChangeProposalWrapper]]:
     """Emit a native DataHub `dataContract` on `entity_urn`.
 
     Both the logical `odcs` dataset (where the assertions actually live — the
     self-consistent home) and the bound physical dataset (where consumers browse)
-    use this: the contract just references the schema and data-quality assertion
-    urns, never duplicating assertion entities. State mirrors ODCS `status`
-    (`active` -> ACTIVE, otherwise PENDING). Returns (None, []) when the entry
-    produced no assertions worth pinning a contract to.
+    use this: the contract just references the schema, freshness, and
+    data-quality assertion urns, never duplicating assertion entities. State
+    mirrors ODCS `status` (`active` -> ACTIVE, otherwise PENDING). Returns
+    (None, []) when the entry produced no assertions worth pinning a contract to.
     """
     schema_contracts = (
         [SchemaContractClass(assertion=schema_assertion_urn)]
         if schema_assertion_urn
         else None
     )
+    freshness_contracts = (
+        [FreshnessContractClass(assertion=freshness_assertion_urn)]
+        if freshness_assertion_urn
+        else None
+    )
     dq_contracts = [
         DataQualityContractClass(assertion=urn) for urn in data_quality_assertion_urns
     ]
-    if schema_contracts is None and not dq_contracts:
+    if schema_contracts is None and freshness_contracts is None and not dq_contracts:
         return None, []
 
     contract_urn = odcs_data_contract_urn(entity_urn)
@@ -1580,6 +1703,7 @@ def odcs_to_data_contract_mcps(
                 DataContractPropertiesClass(
                     entity=entity_urn,
                     schema=schema_contracts,
+                    freshness=freshness_contracts,
                     dataQuality=dq_contracts or None,
                 ),
                 StatusClass(removed=False),
