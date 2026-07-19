@@ -265,10 +265,9 @@ class TestUnityCatalogChangeDetection:
     def test_disabled_config_always_processes(self):
         schema = _make_schema()
         table = _make_table(schema, updated_at=datetime(2024, 1, 1))
+        # No table_fingerprint_handler is wired up when change_detection is
+        # disabled, so there is nothing to seed a prior fingerprint into.
         source = _make_source(change_detection_enabled=False)
-
-        fingerprint = str(table.updated_at.timestamp())
-        _seed_prior_fingerprint(source, table, fingerprint)
 
         with patch.object(source, "process_table", return_value=iter([])):
             source.unity_catalog_api_proxy.tables.return_value = [table]
