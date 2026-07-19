@@ -1607,15 +1607,12 @@ def odcs_to_freshness_assertion_mcps(
     contract: ODCSContract,
     entity_urn: str,
 ) -> Tuple[Optional[str], List[MetadataChangeProposalWrapper]]:
-    """Emit a FRESHNESS assertion from the contract's `frequency` SLA.
+    """Emit a DATASET_CHANGE FRESHNESS assertion from the contract's `frequency` SLA.
 
-    ODCS declares refresh cadence contract-wide via `slaProperties[]
-    {property: frequency}`, so it governs every logical dataset the contract
-    materializes. It maps to a DATASET_CHANGE assertion on a FIXED_INTERVAL
-    schedule (frequency 1 unit `d` -> "changes at least every 1 day"). The SLA
-    `element` is measurement detail, recorded as a custom property rather than
-    used to target a specific entry. Returns (None, []) when there is no
-    `frequency` SLA or its unit is not a calendar interval we can express.
+    The SLA is contract-wide, so it governs every logical dataset the contract
+    materializes; its `element` is measurement detail, kept as a custom property
+    rather than used to target one entry. Returns (None, []) when there is no
+    `frequency` SLA or its unit is not a calendar interval.
     """
     sla = _frequency_sla(contract)
     if sla is None:

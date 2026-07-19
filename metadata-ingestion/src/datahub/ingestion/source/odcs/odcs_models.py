@@ -250,12 +250,7 @@ class ODCSServer(ODCSBaseModel):
 
 
 class ODCSSlaProperty(ODCSBaseModel):
-    """One entry in the contract-level `slaProperties[]` (QoS) list.
-
-    `property` names the SLA dimension (e.g. `frequency`, `latency`,
-    `retention`, `generalAvailability`); `value`/`unit` carry its magnitude and
-    `element` optionally points at the `table.column` used to measure it.
-    """
+    """One entry in the contract-level `slaProperties[]` (QoS) list."""
 
     property: Optional[str] = None
     value: Optional[Union[str, int, float, bool]] = None

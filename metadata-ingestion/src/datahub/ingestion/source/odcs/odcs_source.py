@@ -522,12 +522,10 @@ class ODCSSource(StatefulIngestionSourceBase):
     def _urn_exists_in_graph(self, urn: str, *, strict: bool = False) -> Optional[bool]:
         """Best-effort, cached existence check for any URN.
 
-        Returns None when no graph is attached (file sink). Definitive results
-        are cached (one lookup per unique URN per run); lookup errors are not
-        cached. On a lookup error, non-strict callers fail OPEN (return True) so
-        a flaky GMS never drops owners, while strict callers fail CLOSED (return
-        False) so `verify_physical_urns_exist` is not silently defeated by a
-        transient GMS blip.
+        Returns None when no graph is attached (file sink); definitive results
+        are cached, errors are not. On a lookup error, non-strict callers fail
+        OPEN (never drop owners) while strict callers fail CLOSED, so a flaky
+        GMS cannot silently defeat `verify_physical_urns_exist`.
         """
         graph = self.ctx.graph
         if graph is None:
